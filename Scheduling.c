@@ -4,14 +4,12 @@
 #include <errno.h>
 #include <limits.h>
 
-
-//
 //////////////////////////////////////////////////
 ////////////////////////////////////////////////// globals
 //////////////////////////////////////////////////
 
 #define JOB_COUNT_MAX 100
-#define END_TIME 100
+#define END_TIME 100000
 
 char *jobsFilename = "jobs.dat";
 
@@ -31,7 +29,9 @@ typedef struct {
     enum JobStatus status;
     int startTime;
     int endTime;
-
+    int timeRunning;     // time spent running so far
+    int timeLeft;        // time left to run, duration - timeRunning
+    int lastStartedTime; // last started by scheduler
 } Job;
 
 //////////////////////////////////////////////////
@@ -81,6 +81,7 @@ int allJobsDone(Job *jobs, int jobCount) {
 
     return 1; // all done
 }
+
 int printRunLog(Job *jobs, int jobCount, char *schedulerType) {
     printf("Run log for %s:\n", schedulerType);
     for(int i = 0; i < jobCount; i++) {
@@ -98,85 +99,194 @@ int printRunLog(Job *jobs, int jobCount, char *schedulerType) {
     return 1; // all done
 }
 
-int findJobToRunFIFO(Job *jobs, int jobCount) {
-
-    int minArrivalTime = INT_MAX;
-    int jobToRunId     = -1;
-
+Job *runningJob(Job *jobs, int jobCount) {
     for(int i = 0; i < jobCount; i++) {
         Job *j = &jobs[i];
-        if((j->status == RUNNABLE) && (j->arrivalTime < minArrivalTime)) {
-            minArrivalTime = j->arrivalTime;
-            jobToRunId     = i;
+        if(j->status == RUNNING) {
+            return j;
         }
     }
 
-    return jobToRunId;
+    return NULL;
 }
 
-void runFIFO(Job *jobs, int jobCount) {
-    int runningJobId = -1;
-    int runningJobEndTime = -1;
+// marks finished running job (if any) as DONE
+void markFinishedJob(Job *jobs, int jobCount, int ticker) {
+    Job *j = runningJob(jobs, jobCount);
+    if((j != NULL) && (j->endTime <= ticker)) {
+        j->status  = DONE;
+        j->endTime = ticker;
+    }
+}
 
-    for(int ticker = 0; ticker < END_TIME; ticker++) {
-        printf("runFIFO: ticker [%03d]\n", ticker);
+// first in first out, no preemption
+Job *chooseJobFIFO(Job *jobs, int jobCount, int ticker) {
+
+    int minArrivalTime = INT_MAX;
+    Job *chosenJob      = NULL;
+
+    for(int i = 0; i < jobCount; i++) {
+        Job *j = &jobs[i];
+        if(j->status == RUNNING) { // no preemption
+            chosenJob = NULL;
+            break;
+        }
+        if((j->status == RUNNABLE) && (j->arrivalTime < minArrivalTime)) {
+            minArrivalTime = j->arrivalTime;
+            chosenJob     = j;
+        }
+    }
+
+    return chosenJob;
+}
+
+// short job first, no preemption
+Job *chooseJobSJF(Job *jobs, int jobCount, int ticker) {
+
+    int minDuration = INT_MAX;
+    Job *chosenJob  = NULL;
+
+    for(int i = 0; i < jobCount; i++) {
+        Job *j = &jobs[i];
+        if(j->status == RUNNING) { // no preemption
+            chosenJob = NULL;
+            break;
+        }
+        if((j->status == RUNNABLE) && (j->duration < minDuration)) {
+            minDuration = j->duration;
+            chosenJob   = j;
+        }
+    }
+
+    return chosenJob;
+}
+
+// biggest job first, no preemption
+Job *chooseJobBJF(Job *jobs, int jobCount, int ticker) {
+
+    int maxDuration = -1;
+    Job *chosenJob  = NULL;
+
+    for(int i = 0; i < jobCount; i++) {
+        Job *j = &jobs[i];
+        if(j->status == RUNNING) { // no preemption
+            chosenJob = NULL;
+            break;
+        }
+        if((j->status == RUNNABLE) && (j->duration > maxDuration)) {
+            maxDuration = j->duration;
+            chosenJob   = j;
+        }
+    }
+
+    return chosenJob;
+}
+
+// shortest time to completion first
+Job *chooseJobSTCF(Job *jobs, int jobCount, int ticker) {
+
+    int minTimeLeft = INT_MAX;
+    Job *chosenJob  = NULL;
+
+    for(int i = 0; i < jobCount; i++) {
+        Job *j = &jobs[i];
+        if((j->status == RUNNABLE) && (j->timeLeft < minTimeLeft)) {
+            minTimeLeft = j->timeLeft;
+            chosenJob   = j;
+        }
+    }
+
+    return chosenJob;
+}
+
+// round robin
+Job *chooseJobRR(Job *jobs, int jobCount, int ticker) {
+
+    static int rrSlice = 3;
+
+    Job *running = runningJob(jobs, jobCount);
+
+    if(running == NULL) {
         for(int i = 0; i < jobCount; i++) {
             Job *j = &jobs[i];
-            if(
-                (j->arrivalTime == ticker) &&
-                (j->status != DONE)
-            ) {
-                printf("runFIFO: \tjob [%d]: setting to RUNNABLE\n", i);
-                j->status = RUNNABLE;
+            if(j->status == RUNNABLE) {
+                return j;
             }
         }
-        if((runningJobId != -1) && (runningJobEndTime <= ticker)) {
-            // end current job
-            printf("runFIFO: \tjob [%d]: setting to DONE\n", runningJobId);
-            jobs[runningJobId].status = DONE;
-            jobs[runningJobId].endTime = ticker;
-            runningJobId = -1;
-            runningJobEndTime = -1;
+        return NULL;
+    } else {
+        if((ticker - running->lastStartedTime) >= rrSlice) {
+            // time to get somebody else a chance, next available id
+            // starting with running job id
+            for(int i = running->id; i < jobCount; i++) {
+                Job *j = &jobs[i];
+                if(j->status == RUNNABLE) {
+                    return j;
+                }
+            }
+            for(int i = 0; i < running->id; i++) {
+                Job *j = &jobs[i];
+                if(j->status == RUNNABLE) {
+                    return j;
+                }
+            }
+            // nobody else is available
+            return NULL;
+        } else {
+            // keep it running
+            return NULL;
         }
-        if(runningJobId == -1) {
-            // start a new job, if any available
-            int jobId = findJobToRunFIFO(jobs, jobCount);
-            if(jobId != -1) {
-                Job *j            = &jobs[jobId];
-                j->status         = RUNNING;
-                j->startTime      = ticker;
-                runningJobId      = jobId;
-                runningJobEndTime = ticker + j->duration;
-                printf(
-                    "runFIFO: \tjob [%d]: start! end time %d\n",
-                    jobId,
-                    runningJobEndTime
-                );
-            } else {
-                printf("runFIFO: \tnothing to run\n");
+    }
+
+    return NULL;
+}
+
+void run(
+    char *schedulerType,
+    Job *(*chooseJob)(Job *jobs, int jobCount, int ticker),
+    Job *jobs,
+    int jobCount
+) {
+    for(int ticker = 0; ticker < END_TIME; ticker++) {
+        for(int i = 0; i < jobCount; i++) {
+            Job *j = &jobs[i];
+            if((j->arrivalTime == ticker) && (j->status == UNKNOWN)) {
+                j->status          = RUNNABLE;
+                j->startTime       = -1;
+                j->endTime         = -1;
+                j->timeRunning     = 0;
+                j->timeLeft        = j->duration;
+                j->lastStartedTime = -1;
             }
         }
+
+        markFinishedJob(jobs, jobCount, ticker);
+
+        Job *chosenJob = chooseJob(jobs, jobCount, ticker);
+        if(chosenJob != NULL) {
+            Job *j;
+            if((j = runningJob(jobs, jobCount)) != NULL) {
+                // move running job aside
+                j->status      = RUNNABLE;
+                j->timeRunning += j->timeLeft - j->lastStartedTime;
+                j->timeLeft    = j->duration - j->timeRunning;
+            }
+            // start the chosen job
+            chosenJob->status          = RUNNING;
+            chosenJob->startTime       = (chosenJob->startTime == -1) ?
+                ticker : chosenJob->startTime;
+            chosenJob->lastStartedTime = ticker;
+            chosenJob->endTime         = ticker + chosenJob->timeLeft;
+        }
+
         if(allJobsDone(jobs, jobCount)) {
-            printf("runFIFO: ALL JOBS DONE\n");
             break;
         }
     }
 
-    printRunLog(jobs, jobCount, "FIFO");
+    printRunLog(jobs, jobCount, schedulerType);
 
     return;
-}
-
-void runSJF(Job *jobs, int jobCount) {
-}
-
-void runBJF(Job *jobs, int jobCount) {
-}
-
-void runSTCF(Job *jobs, int jobCount) {
-}
-
-void runRR(Job *jobs, int jobCount) {
 }
 
 //////////////////////////////////////////////////
@@ -187,12 +297,11 @@ int main(void) {
     Job jobs[JOB_COUNT_MAX + 1] = {0};
     int jobCount = readJobs(jobsFilename, jobs, JOB_COUNT_MAX);
 
-    runFIFO(jobs, jobCount);
-    runSJF(jobs, jobCount);
-    runBJF(jobs, jobCount);
-    runSTCF(jobs, jobCount);
-    runRR(jobs, jobCount);
+    run("FIFO", chooseJobFIFO, jobs, jobCount); // no preemption
+    run("SJF",  chooseJobSJF,  jobs, jobCount); // no preemption
+    run("BJF",  chooseJobBJF,  jobs, jobCount); // no preemption
+    run("STCF", chooseJobSTCF, jobs, jobCount);
+    run("RR",   chooseJobRR,   jobs, jobCount);
 
     return 0;
 }
-
