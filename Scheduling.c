@@ -82,6 +82,31 @@ int allJobsDone(Job *jobs, int jobCount) {
     return 1; // all done
 }
 
+void printRunStatus(Job *jobs, int jobCount, int ticker) {
+    if(ticker == 0) {
+        printf("Job ID:     ");
+        for(int i = 0; i < jobCount; i++) {
+            Job *j = &jobs[i];
+            printf("[%02d]", j->id);
+        }
+        printf("\n");
+    }
+    printf("Ticker %03d: ", ticker);
+    for(int i = 0; i < jobCount; i++) {
+        Job *j = &jobs[i];
+        switch(j->status) {
+        case UNKNOWN:  printf("|   "); break;
+        case RUNNABLE: printf("| . "); break;
+        case RUNNING:  printf("|***"); break;
+        case DONE:     printf("| - "); break;
+        default:
+            printf("ERROR: unknown job status [%d]\n", j->status);
+            exit(EXIT_FAILURE);
+        }
+    }
+    printf("|\n");
+}
+
 int printRunLog(Job *jobs, int jobCount, char *schedulerType) {
     printf("Run log for %s:\n", schedulerType);
     for(int i = 0; i < jobCount; i++) {
@@ -97,6 +122,18 @@ int printRunLog(Job *jobs, int jobCount, char *schedulerType) {
     }
 
     return 1; // all done
+}
+
+void eraseRunLog(Job *jobs, int jobCount) {
+    for(int i = 0; i < jobCount; i++) {
+        Job *j = &jobs[i];
+        j->status          = UNKNOWN;
+        j->startTime       = -1;
+        j->endTime         = -1;
+        j->timeRunning     = -1;
+        j->timeLeft        = -1;
+        j->lastStartedTime = -1;
+    }
 }
 
 Job *runningJob(Job *jobs, int jobCount) {
@@ -190,7 +227,10 @@ Job *chooseJobSTCF(Job *jobs, int jobCount, int ticker) {
 
     for(int i = 0; i < jobCount; i++) {
         Job *j = &jobs[i];
-        if((j->status == RUNNABLE) && (j->timeLeft < minTimeLeft)) {
+        if(
+            ((j->status == RUNNABLE) || (j->status == RUNNING)) &&
+            (j->timeLeft < minTimeLeft)
+        ) {
             minTimeLeft = j->timeLeft;
             chosenJob   = j;
         }
@@ -268,7 +308,7 @@ void run(
             if((j = runningJob(jobs, jobCount)) != NULL) {
                 // move running job aside
                 j->status      = RUNNABLE;
-                j->timeRunning += j->timeLeft - j->lastStartedTime;
+                j->timeRunning += ticker - j->lastStartedTime;
                 j->timeLeft    = j->duration - j->timeRunning;
             }
             // start the chosen job
@@ -279,12 +319,15 @@ void run(
             chosenJob->endTime         = ticker + chosenJob->timeLeft;
         }
 
+        printRunStatus(jobs, jobCount, ticker);
+
         if(allJobsDone(jobs, jobCount)) {
             break;
         }
     }
 
     printRunLog(jobs, jobCount, schedulerType);
+    eraseRunLog(jobs, jobCount);
 
     return;
 }
@@ -305,3 +348,4 @@ int main(void) {
 
     return 0;
 }
+
